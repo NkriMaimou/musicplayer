@@ -44,6 +44,7 @@ local autoplay_next = true
 local currentVideo = nil
 local playingVideo = false
 local audioPosition = 0
+local restart_requested = false
 
 -- Tape drive
 local tape = peripheral.find("tape_drive")
@@ -106,12 +107,12 @@ local function downloadLatestPlayer()
     if not file then return false, "Cannot open musica.lua.new" end
     file.write(code)
     file.close()
-
-    if fs.exists("musica.lua") then
-        fs.delete("musica.lua")
-    end
-    fs.move("musica.lua.new", "musica.lua")
     return true, nil
+end
+
+local function replacePlayerFile()
+    if fs.exists("musica.lua") then fs.delete("musica.lua") end
+    fs.move("musica.lua.new", "musica.lua")
 end
 
 local function parseNFV(raw)
@@ -138,25 +139,12 @@ local function parseNFV(raw)
 end
 
 local function drawNFVFrame(target, frame, w, h, x, y)
-    local nfp_colors = {
-        ["0"] = colors.white, ["1"] = colors.orange,
-        ["2"] = colors.magenta, ["3"] = colors.lightBlue,
-        ["4"] = colors.yellow, ["5"] = colors.lime,
-        ["6"] = colors.pink, ["7"] = colors.gray,
-        ["8"] = colors.lightGray, ["9"] = colors.cyan,
-        ["a"] = colors.purple, ["b"] = colors.blue,
-        ["c"] = colors.brown, ["d"] = colors.green,
-        ["e"] = colors.red, ["f"] = colors.black
-    }
-
     for row = 1, h do
-        for col = 1, w do
-            local char = frame:sub((row - 1) * w + col, (row - 1) * w + col)
-
-            target.setCursorPos(x + col - 1, y + row - 1)
-            target.setBackgroundColor(nfp_colors[char] or colors.black)
-            target.write(" ")
-        end
+        local row_start = (row - 1) * w + 1
+        local background = frame:sub(row_start, row_start + w - 1):lower()
+        background = background:gsub("#", "f"):gsub("%.", "0")
+        target.setCursorPos(x, y + row - 1)
+        target.blit(string.rep(" ", w), string.rep("0", w), background)
     end
     target.setBackgroundColor(colors.black)
 end
@@ -165,6 +153,11 @@ local function drawCurrentVideoFrame()
     if not video_monitor or not playingVideo or not currentVideo then return end
 
     local frame_index = math.floor(audioPosition * currentVideo.fps) + 1
+    if frame_index < 1 then frame_index = 1 end
+    if frame_index > #currentVideo.frames then
+        frame_index = #currentVideo.frames
+    end
+
     local frame = currentVideo.frames[frame_index]
     if frame then
         drawNFVFrame(
@@ -615,6 +608,8 @@ local function uiLoop()
     redrawScreen()
 
     while true do
+        if restart_requested then return end
+
         if waiting_for_input then
             parallel.waitForAny(
                 function()
@@ -662,8 +657,17 @@ local function uiLoop()
                         local updated, update_error = downloadLatestPlayer()
                         term.setCursorPos(2, 2)
                         term.setTextColor(updated and colors.green or colors.red)
-                        term.write(updated and "Updated musica.lua - restart" or "Update failed: " .. update_error)
+                        term.write(updated and "Downloaded musica.lua.new" or "Update failed: " .. update_error)
                         sleep(1.5)
+                        if updated then
+                            if tape then tape.stop() end
+                            playingVideo = false
+                            currentVideo = nil
+                            audioPosition = 0
+                            replacePlayerFile()
+                            restart_requested = true
+                            return
+                        end
                         redrawScreen()
                         return
                     end
@@ -859,6 +863,11 @@ local function uiLoop()
                                                 currentVideo = parseNFV(rawNFV)
                                                 playingVideo = currentVideo ~= nil
                                             end
+                                        elseif not video_monitor then
+                                            term.setCursorPos(2, 2)
+                                            term.setTextColor(colors.red)
+                                            term.write("No monitor found")
+                                            sleep(1.5)
                                         end
 
                                         redrawScreen()
@@ -1005,3 +1014,8 @@ end
 -----------------------------
 
 parallel.waitForAny(uiLoop, httpLoop, videoLoop)
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)
