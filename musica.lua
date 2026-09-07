@@ -47,6 +47,13 @@ local audioPosition = 0
 
 -- Tape drive
 local tape = peripheral.find("tape_drive")
+local video_monitor = peripheral.find("monitor")
+
+if video_monitor then
+    pcall(function() video_monitor.setTextScale(0.5) end)
+    video_monitor.setBackgroundColor(colors.black)
+    video_monitor.clear()
+end
 
 term.clear()
 if not tape then
@@ -99,6 +106,11 @@ local function downloadLatestPlayer()
     if not file then return false, "Cannot open musica.lua.new" end
     file.write(code)
     file.close()
+
+    if fs.exists("musica.lua") then
+        fs.delete("musica.lua")
+    end
+    fs.move("musica.lua.new", "musica.lua")
     return true, nil
 end
 
@@ -650,7 +662,7 @@ local function uiLoop()
                         local updated, update_error = downloadLatestPlayer()
                         term.setCursorPos(2, 2)
                         term.setTextColor(updated and colors.green or colors.red)
-                        term.write(updated and "Downloaded musica.lua.new" or "Update failed: " .. update_error)
+                        term.write(updated and "Updated musica.lua - restart" or "Update failed: " .. update_error)
                         sleep(1.5)
                         redrawScreen()
                         return
@@ -834,13 +846,18 @@ local function uiLoop()
                                             tape.play()
                                         end
 
-                                        if result.url then
-                                            local video_url = backend_video_url .. textutils.urlEncode(result.url)
+                                        local video_source = result.url or result.id
+                                        if video_source and video_monitor then
+                                            local video_width, video_height = video_monitor.getSize()
+                                            local video_url = backend_video_url
+                                                .. textutils.urlEncode(tostring(video_source))
+                                                .. "&resolution=" .. video_width .. "x" .. video_height
+                                                .. "&fps=12"
                                             local rawNFV = fetchNFV(video_url)
 
                                             if rawNFV then
                                                 currentVideo = parseNFV(rawNFV)
-                                                playingVideo = true
+                                                playingVideo = currentVideo ~= nil
                                             end
                                         end
 
