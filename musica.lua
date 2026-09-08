@@ -12,9 +12,9 @@
 
 local api_base_url = "https://ipod-2to6magyna-uc.a.run.app/"
 local version = "2.1"
-local backend_url = "https://trade-playhouse-excavate.ngrok-free.dev/convert?url="
-local backend_video_url = "https://trade-playhouse-excavate.ngrok-free.dev/convertVideo?url="
-local player_update_url = "https://trade-playhouse-excavate.ngrok-free.dev/musica.lua"
+local backend_url = "https://m9poyt8hx6hn.share.zrok.io/convert?url="
+local backend_video_url = "https://m9poyt8hx6hn.share.zrok.io/convertVideo?url="
+local player_update_url = "https://m9poyt8hx6hn.share.zrok.io/musica.lua"
 
 
 local width, height = term.getSize()
@@ -862,6 +862,10 @@ local function uiLoop()
                                             if rawNFV then
                                                 currentVideo = parseNFV(rawNFV)
                                                 playingVideo = currentVideo ~= nil
+                                                if playingVideo then
+                                                    audioPosition = 0
+                                                    drawCurrentVideoFrame()
+                                                end
                                             end
                                         elseif not video_monitor then
                                             term.setCursorPos(2, 2)
