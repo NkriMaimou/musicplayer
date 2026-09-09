@@ -1,28 +1,9 @@
 --[[
     CC:Tweaked Tape Media Player
-    Version 2.1
-
-    Features:
-    - YouTube search
-    - Search result playback
-    - Rolling NFV video frame buffer
-    - Audio/video synchronization using tape position
-    - Playlist
-    - Queue
-    - Autoplay
-    - Play / pause
-    - Stop / rewind
-    - Next
-    - Wipe
-    - Progress bar
-    - Metadata
-    - Scrollbars
-    - Player update
-
-    Rolling video buffer:
-    - Video downloader runs independently from monitor renderer.
-    - Only a configurable number of seconds are kept in RAM.
-    - Monitor can render independently from network download speed.
+    Unified file with search, playlist, queue, progress bar, metadata,
+    play/pause, stop=rewind, wipe, next button, and scrollbars.
+    Search fix applied (zone detection + tab switching).
+    Playlist tab added with controls, history removed.
 ]]
 
 -----------------------------
@@ -41,14 +22,11 @@ local backend_video_url =
 local player_update_url =
     "https://eayvsdooajd4.share.zrok.io/musica.lua"
 
-local width, height = term.getSize()
 
+local width, height = term.getSize()
 local tab = 1 -- 1=Search, 2=Playlist, 3=Queue
 
------------------------------
--- SEARCH STATE
------------------------------
-
+-- Search state
 local waiting_for_input = false
 local last_search = nil
 local last_search_url = nil
@@ -57,119 +35,61 @@ local search_error = false
 local search_scroll = 0
 local max_scroll = 0
 
------------------------------
--- PLAYLIST STATE
------------------------------
-
+-- Playlist state
 local playlist = {}
 local playlist_scroll = 0
 local playlist_max_scroll = 0
 
------------------------------
--- QUEUE STATE
------------------------------
-
+-- Queue state
 local tape_queue = {}
 local queue_scroll = 0
 local queue_max_scroll = 0
 local autoplay_next = true
 
------------------------------
--- AUDIO / VIDEO STATE
------------------------------
-
+-- Video state
 local currentVideo = nil
 local playingVideo = false
 local audioPosition = 0
 local restart_requested = false
-
--- Source video FPS.
 local video_fps = 125
-
--- Monitor update target.
---
--- Increase this if the monitor/computer can keep up.
-local monitor_fps = 60
-
+local monitor_fps = 20
 local last_rendered_frame = nil
-
--- DFPWM tape timing.
 local dfpwm_bytes_per_second = 6000
 
------------------------------
--- ROLLING VIDEO BUFFER
------------------------------
+-- Video synchronization
+local VIDEO_PREBUFFER_FRAMES = 60
 
--- How many seconds of video to keep in RAM.
---
--- At 125 FPS:
---
--- 4 seconds  = 500 frames
--- 8 seconds  = 1000 frames
--- 12 seconds = 1500 frames
--- 20 seconds = 2500 frames
---
--- Increase if you have enough RAM.
-local VIDEO_BUFFER_SECONDS = 8
-
--- Number of frames allowed in the ring buffer.
-local video_buffer_size = 0
-
--- Video stream state.
+-- Rolling video buffer
+local VIDEO_BUFFER_FRAMES = 120
+local VIDEO_REFILL_FRAMES = 20
+local VIDEO_REFILL_THRESHOLD = 40
 local video_streaming = false
 local video_stream_handle = nil
 local video_stream_coroutine = nil
 
--- Events.
-local video_buffer_event = "video_buffer_frame"
-local video_stream_finished_event = "video_stream_finished"
-
------------------------------
--- TAPE DRIVE
------------------------------
-
+-- Tape drive
 local tape = peripheral.find("tape_drive")
-
------------------------------
--- MONITOR
------------------------------
-
 local video_monitor = peripheral.find("monitor")
 
 if video_monitor then
-    pcall(function()
-        video_monitor.setTextScale(0.5)
-    end)
-
+    pcall(function() video_monitor.setTextScale(0.5) end)
     video_monitor.setBackgroundColor(colors.black)
     video_monitor.clear()
 end
-
------------------------------
--- AUDIO TIME
------------------------------
 
 local function getAudioTime()
     if tape then
         return tape.getPosition() / dfpwm_bytes_per_second
     end
-
     return audioPosition
 end
 
------------------------------
--- STARTUP
------------------------------
-
 term.clear()
-
 if not tape then
     print("No Tape Drive found!")
     return
 else
-    pcall(function()
-        tape.getPosition()
-    end)
+    pcall(function() tape.getPosition() end)
 end
 
 -----------------------------
@@ -177,9 +97,7 @@ end
 -----------------------------
 
 local function filterPromo(results)
-    if not results then
-        return nil
-    end
+    if not results then return nil end
 
     local cleaned = {}
 
@@ -197,15 +115,7 @@ local function filterPromo(results)
     return cleaned
 end
 
------------------------------
--- BUILD AUDIO DOWNLOAD URL
------------------------------
-
 local function build_download_url(result)
-    if not result then
-        return nil
-    end
-
     local video_url = result.url or result.id or ""
 
     if video_url == "" then
@@ -215,10 +125,6 @@ local function build_download_url(result)
     return backend_url .. textutils.urlEncode(video_url)
 end
 
------------------------------
--- BASIC NFV FETCH
------------------------------
-
 local function fetchNFV(url)
     local h = http.get(url)
 
@@ -227,20 +133,15 @@ local function fetchNFV(url)
     end
 
     local data = h.readAll()
-
     h.close()
 
     return data
 end
 
------------------------------
--- VIDEO RENDER FUNCTION
------------------------------
-
 local renderCurrentVideoFrame
 
 -----------------------------
--- ROLLING BUFFER HELPERS
+-- ROLLING VIDEO BUFFER
 -----------------------------
 
 local function getBufferedFrame(video, frame_number)
@@ -257,14 +158,10 @@ local function getBufferedFrame(video, frame_number)
     end
 
     local index =
-        ((frame_number - video.first_frame) % video.buffer_size) + 1
+        ((frame_number - 1) % video.buffer_size) + 1
 
     return video.frames[index]
 end
-
------------------------------
--- STOP VIDEO STREAM
------------------------------
 
 local function stopVideoStream()
     video_streaming = false
@@ -280,19 +177,7 @@ local function stopVideoStream()
     video_stream_coroutine = nil
 end
 
------------------------------
--- STREAM NFV
---
--- Opens the NFV stream and immediately
--- returns a video object.
---
--- Frames are downloaded by videoStreamLoop()
--- and placed into the rolling buffer.
------------------------------
-
 local function streamNFV(url)
-
-    -- Stop previous stream.
     stopVideoStream()
 
     local handle = http.get(url)
@@ -300,10 +185,6 @@ local function streamNFV(url)
     if not handle then
         return nil, "HTTP failed"
     end
-
-    -----------------------------
-    -- READ NFV HEADER
-    -----------------------------
 
     local header = handle.readLine()
 
@@ -326,25 +207,8 @@ local function streamNFV(url)
         or not stream_fps then
 
         handle.close()
-
         return nil, "Invalid NFV header"
     end
-
-    -----------------------------
-    -- BUFFER SIZE
-    -----------------------------
-
-    video_buffer_size =
-        math.max(
-            2,
-            math.floor(
-                stream_fps * VIDEO_BUFFER_SECONDS
-            )
-        )
-
-    -----------------------------
-    -- VIDEO OBJECT
-    -----------------------------
 
     currentVideo = {
         width = stream_width,
@@ -353,12 +217,16 @@ local function streamNFV(url)
 
         frames = {},
 
-        buffer_size = video_buffer_size,
+        -- Fixed rolling circular buffer.
+        buffer_size = VIDEO_BUFFER_FRAMES,
 
         first_frame = 1,
         last_frame = 0,
 
         received_frames = 0,
+
+        -- Frames requested from the stream but not yet received.
+        pending_frames = VIDEO_PREBUFFER_FRAMES,
 
         finished = false,
         stream_error = nil
@@ -366,16 +234,8 @@ local function streamNFV(url)
 
     last_rendered_frame = nil
 
-    -----------------------------
-    -- STREAM STATE
-    -----------------------------
-
     video_stream_handle = handle
     video_streaming = true
-
-    -----------------------------
-    -- PRODUCER COROUTINE
-    -----------------------------
 
     video_stream_coroutine = coroutine.create(function()
 
@@ -385,85 +245,48 @@ local function streamNFV(url)
             and video_streaming
             and currentVideo == video do
 
-            -----------------------------
-            -- READ ONE FRAME
-            -----------------------------
+            -- Read exactly one frame per coroutine resume.
+            -- No stream batching: the rolling buffer is refilled
+            -- in 20-frame requests controlled by playback.
+            if video.pending_frames <= 0 then
+                coroutine.yield()
+            else
+                local frame = handle.readLine()
 
-            local frame = handle.readLine()
+                if not frame then
+                    break
+                end
 
-            if not frame then
-                video.finished = true
-                break
+                video.pending_frames =
+                    video.pending_frames - 1
+
+                video.received_frames =
+                    video.received_frames + 1
+
+                local frame_number =
+                    video.received_frames
+
+                local index =
+                    ((frame_number - 1)
+                    % video.buffer_size) + 1
+
+                video.frames[index] = frame
+
+                video.last_frame = frame_number
+
+                if video.last_frame -
+                   video.first_frame + 1
+                   > video.buffer_size then
+
+                    video.first_frame =
+                        video.last_frame
+                        - video.buffer_size
+                        + 1
+                end
+
+                coroutine.yield()
             end
-
-            -----------------------------
-            -- CONVERT FRAME TO ROWS
-            -----------------------------
-
-            local rows = {}
-
-            for row = 1, stream_height do
-
-                local row_start =
-                    (row - 1) * stream_width + 1
-
-                rows[row] =
-                    frame:sub(
-                        row_start,
-                        row_start + stream_width - 1
-                    )
-            end
-
-            -----------------------------
-            -- FRAME NUMBER
-            -----------------------------
-
-            video.received_frames =
-                video.received_frames + 1
-
-            local frame_number =
-                video.received_frames
-
-            -----------------------------
-            -- RING BUFFER
-            -----------------------------
-
-            if video.last_frame -
-               video.first_frame + 1
-               >= video.buffer_size then
-
-                video.first_frame =
-                    video.first_frame + 1
-            end
-
-            -----------------------------
-            -- BUFFER INDEX
-            -----------------------------
-
-            local index =
-                ((frame_number - 1)
-                % video.buffer_size) + 1
-
-            video.frames[index] = rows
-
-            video.last_frame = frame_number
-
-            -----------------------------
-            -- SIGNAL NEW FRAME
-            -----------------------------
-
-            os.queueEvent(video_buffer_event)
-
-            -----------------------------
-            -- YIELD
-            -----------------------------
-
-            coroutine.yield()
         end
-
-        -----------------------------
-        -- STREAM COMPLETE
-        -----------------------------
 
         pcall(function()
             handle.close()
@@ -475,16 +298,186 @@ local function streamNFV(url)
 
         video_streaming = false
         video.finished = true
-
-        os.queueEvent(video_stream_finished_event)
     end)
 
     return currentVideo
 end
 
+local function videoStreamLoop()
+    while true do
+
+        if video_stream_coroutine then
+
+            if coroutine.status(video_stream_coroutine) == "dead" then
+                video_stream_coroutine = nil
+
+            elseif currentVideo
+                and currentVideo.pending_frames > 0 then
+
+                -- One resume = one frame read.
+                local ok, err =
+                    coroutine.resume(video_stream_coroutine)
+
+                if not ok then
+
+                    if currentVideo then
+                        currentVideo.stream_error =
+                            tostring(err)
+
+                        currentVideo.finished = true
+                    end
+
+                    video_streaming = false
+
+                    if video_stream_handle then
+                        pcall(function()
+                            video_stream_handle.close()
+                        end)
+
+                        video_stream_handle = nil
+                    end
+
+                    video_stream_coroutine = nil
+                end
+
+            else
+                -- Wait until playback requests the next 20 frames.
+                sleep(0.01)
+            end
+        else
+            sleep(0.01)
+        end
+    end
+end
+
 -----------------------------
--- DRAW NFV FRAME
+-- VIDEO PREBUFFER
 -----------------------------
+
+local function waitForVideoPrebuffer(video)
+    if not video then
+        return false
+    end
+
+    local start_time = os.epoch("utc")
+    local timeout_ms = 5000
+
+    while true do
+
+        if currentVideo ~= video then
+            return false
+        end
+
+        if video.received_frames >= VIDEO_PREBUFFER_FRAMES then
+            return true
+        end
+
+        if video.finished then
+            return video.received_frames > 0
+        end
+
+        local now = os.epoch("utc")
+
+        if now - start_time >= timeout_ms then
+            return video.received_frames > 0
+        end
+
+        sleep(0.01)
+    end
+end
+
+-----------------------------
+-- PLAYER UPDATE
+-----------------------------
+
+local function downloadLatestPlayer()
+    local response, request_error =
+        http.get(
+            player_update_url,
+            nil,
+            true
+        )
+
+    if not response then
+        return false,
+            request_error or "HTTP request failed"
+    end
+
+    local code = response.readAll()
+    response.close()
+
+    if type(code) ~= "string"
+        or code == "" then
+
+        return false, "Empty response"
+    end
+
+    local file =
+        fs.open("musica.lua.new", "w")
+
+    if not file then
+        return false,
+            "Cannot open musica.lua.new"
+    end
+
+    file.write(code)
+    file.close()
+
+    return true, nil
+end
+
+local function replacePlayerFile()
+    if fs.exists("musica.lua") then
+        fs.delete("musica.lua")
+    end
+
+    fs.move(
+        "musica.lua.new",
+        "musica.lua"
+    )
+end
+
+local function parseNFV(raw)
+    local lines = {}
+
+    for line in raw:gmatch("[^\r\n]+") do
+        table.insert(lines, line)
+    end
+
+    local header = lines[1]
+
+    if not header then
+        return nil
+    end
+
+    local w, h, fps =
+        header:match("(%d+)%s+(%d+)%s+(%d+)")
+
+    w = tonumber(w)
+    h = tonumber(h)
+    fps = tonumber(fps)
+
+    if not w
+        or not h
+        or not fps
+        or #lines < 2 then
+
+        return nil
+    end
+
+    local frames = {}
+
+    for i = 2, #lines do
+        frames[i - 1] = lines[i]
+    end
+
+    return {
+        width = w,
+        height = h,
+        fps = fps,
+        frames = frames
+    }
+end
 
 local function drawNFVFrame(
     target,
@@ -495,7 +488,6 @@ local function drawNFVFrame(
     x,
     y
 )
-
     local text =
         string.rep(" ", w)
 
@@ -527,10 +519,6 @@ local function drawNFVFrame(
     end
 end
 
------------------------------
--- RENDER CURRENT VIDEO FRAME
------------------------------
-
 renderCurrentVideoFrame = function()
 
     if not video_monitor
@@ -542,16 +530,8 @@ renderCurrentVideoFrame = function()
 
     local video = currentVideo
 
-    -----------------------------
-    -- AUDIO POSITION
-    -----------------------------
-
     local audio_time =
         getAudioTime()
-
-    -----------------------------
-    -- TARGET FRAME
-    -----------------------------
 
     local target_frame =
         math.floor(
@@ -562,43 +542,38 @@ renderCurrentVideoFrame = function()
         target_frame = 1
     end
 
-    -----------------------------
-    -- NO FRAMES YET
-    -----------------------------
+    if video.last_frame <
+       video.first_frame then
 
-    if video.last_frame < video.first_frame then
         return
     end
 
-    -----------------------------
-    -- NETWORK IS BEHIND PLAYBACK
-    -----------------------------
+    if target_frame >
+       video.last_frame then
 
-    if target_frame > video.last_frame then
-
-        -- Don't advance past the newest
-        -- frame that has actually arrived.
-        target_frame = video.last_frame
+        -- Audio is the master clock. Never display an older frame
+        -- just because the stream has not reached the target yet.
+        return
     end
 
-    -----------------------------
-    -- FRAME FELL OUT OF BUFFER
-    -----------------------------
+    if target_frame <
+       video.first_frame then
 
-    if target_frame < video.first_frame then
-
-        -- Network cannot keep up.
-        --
-        -- Jump to the oldest available
-        -- frame instead of trying to access
-        -- a frame which has already been
-        -- discarded.
-        target_frame = video.first_frame
+        target_frame =
+            video.first_frame
     end
 
-    -----------------------------
-    -- GET BUFFERED FRAME
-    -----------------------------
+    -- Rolling refill:
+    -- once playback is within 40 frames of the newest buffered frame,
+    -- request exactly 20 more frames. The stream itself still reads
+    -- those frames one at a time.
+    if video.last_frame - target_frame <= VIDEO_REFILL_THRESHOLD
+        and video.pending_frames <= 0
+        and not video.finished then
+
+        video.pending_frames =
+            VIDEO_REFILL_FRAMES
+    end
 
     local frame =
         getBufferedFrame(
@@ -610,32 +585,40 @@ renderCurrentVideoFrame = function()
         return
     end
 
-    -----------------------------
-    -- SAME FRAME?
-    -----------------------------
+    if frame ==
+       last_rendered_frame then
 
-    if frame == last_rendered_frame then
         return
     end
 
-    -----------------------------
-    -- MONITOR SIZE
-    -----------------------------
+    local rows = {}
+
+    for row = 1, video.height do
+
+        local row_start =
+            (row - 1)
+            * video.width
+            + 1
+
+        rows[row] =
+            frame:sub(
+                row_start,
+                row_start
+                + video.width
+                - 1
+            )
+    end
 
     local monitor_width,
           monitor_height =
         video_monitor.getSize()
 
-    -----------------------------
-    -- CENTER VIDEO
-    -----------------------------
-
     local x =
         math.max(
             1,
             math.floor(
-                (monitor_width - video.width)
-                / 2
+                (monitor_width
+                - video.width) / 2
             ) + 1
         )
 
@@ -643,144 +626,27 @@ renderCurrentVideoFrame = function()
         math.max(
             1,
             math.floor(
-                (monitor_height - video.height)
-                / 2
+                (monitor_height
+                - video.height) / 2
             ) + 1
         )
 
-    -----------------------------
-    -- DRAW
-    -----------------------------
-
     drawNFVFrame(
         video_monitor,
-        frame,
-        last_rendered_frame,
+        rows,
+        nil,
         video.width,
         video.height,
         x,
         y
     )
 
-    last_rendered_frame = frame
+    last_rendered_frame =
+        frame
 end
 
 -----------------------------
--- DOWNLOAD PLAYER UPDATE
------------------------------
-
-local function downloadLatestPlayer()
-
-    local response,
-          request_error =
-        http.get(
-            player_update_url,
-            nil,
-            true
-        )
-
-    if not response then
-        return false,
-            request_error
-            or "HTTP request failed"
-    end
-
-    local code =
-        response.readAll()
-
-    response.close()
-
-    if type(code) ~= "string"
-        or code == "" then
-
-        return false,
-            "Empty response"
-    end
-
-    local file =
-        fs.open(
-            "musica.lua.new",
-            "w"
-        )
-
-    if not file then
-        return false,
-            "Cannot open musica.lua.new"
-    end
-
-    file.write(code)
-    file.close()
-
-    return true, nil
-end
-
------------------------------
--- REPLACE PLAYER FILE
------------------------------
-
-local function replacePlayerFile()
-
-    if fs.exists("musica.lua") then
-        fs.delete("musica.lua")
-    end
-
-    fs.move(
-        "musica.lua.new",
-        "musica.lua"
-    )
-end
-
------------------------------
--- PARSE NFV
------------------------------
-
-local function parseNFV(raw)
-
-    local lines = {}
-
-    for line in raw:gmatch("[^\r\n]+") do
-        table.insert(lines, line)
-    end
-
-    local header = lines[1]
-
-    if not header then
-        return nil
-    end
-
-    local w, h, fps =
-        header:match(
-            "(%d+)%s+(%d+)%s+(%d+)"
-        )
-
-    w = tonumber(w)
-    h = tonumber(h)
-    fps = tonumber(fps)
-
-    if not w
-        or not h
-        or not fps
-        or #lines < 2 then
-
-        return nil
-    end
-
-    local frames = {}
-
-    for i = 2, #lines do
-        frames[i - 1] = lines[i]
-    end
-
-    return {
-        width = w,
-        height = h,
-        fps = fps,
-        frames = frames
-    }
-end
-
------------------------------
--- SEARCH SCROLLBAR
+-- SCROLLBARS / PROGRESS / METADATA
 -----------------------------
 
 local function drawScrollbarSearch()
@@ -804,7 +670,9 @@ local function drawScrollbarSearch()
     local bar_y_bottom = height
 
     local track_height =
-        bar_y_bottom - bar_y_top + 1
+        bar_y_bottom
+        - bar_y_top
+        + 1
 
     local thumb_height =
         math.max(
@@ -818,15 +686,11 @@ local function drawScrollbarSearch()
     local max_thumb_offset =
         track_height - thumb_height
 
-    local thumb_offset = 0
-
-    if max_scroll > 0 then
-        thumb_offset =
-            math.floor(
-                (search_scroll / max_scroll)
-                * max_thumb_offset
-            )
-    end
+    local thumb_offset =
+        math.floor(
+            (search_scroll / max_scroll)
+            * max_thumb_offset
+        )
 
     for y = bar_y_top, bar_y_bottom do
 
@@ -844,7 +708,8 @@ local function drawScrollbarSearch()
 
     for y =
         bar_y_top + thumb_offset,
-        bar_y_top + thumb_offset + thumb_height - 1 do
+        bar_y_top + thumb_offset
+        + thumb_height - 1 do
 
         term.setCursorPos(
             bar_x,
@@ -862,10 +727,6 @@ local function drawScrollbarSearch()
         colors.black
     )
 end
-
------------------------------
--- PLAYLIST SCROLLBAR
------------------------------
 
 local function drawScrollbarPlaylist()
 
@@ -888,7 +749,9 @@ local function drawScrollbarPlaylist()
     local bar_y_bottom = height
 
     local track_height =
-        bar_y_bottom - bar_y_top + 1
+        bar_y_bottom
+        - bar_y_top
+        + 1
 
     local thumb_height =
         math.max(
@@ -902,15 +765,12 @@ local function drawScrollbarPlaylist()
     local max_thumb_offset =
         track_height - thumb_height
 
-    local thumb_offset = 0
-
-    if playlist_max_scroll > 0 then
-        thumb_offset =
-            math.floor(
-                (playlist_scroll / playlist_max_scroll)
-                * max_thumb_offset
-            )
-    end
+    local thumb_offset =
+        math.floor(
+            (playlist_scroll
+            / playlist_max_scroll)
+            * max_thumb_offset
+        )
 
     for y = bar_y_top, bar_y_bottom do
 
@@ -928,7 +788,8 @@ local function drawScrollbarPlaylist()
 
     for y =
         bar_y_top + thumb_offset,
-        bar_y_top + thumb_offset + thumb_height - 1 do
+        bar_y_top + thumb_offset
+        + thumb_height - 1 do
 
         term.setCursorPos(
             bar_x,
@@ -946,10 +807,6 @@ local function drawScrollbarPlaylist()
         colors.black
     )
 end
-
------------------------------
--- QUEUE SCROLLBAR
------------------------------
 
 local function drawScrollbarQueue()
 
@@ -972,7 +829,9 @@ local function drawScrollbarQueue()
     local bar_y_bottom = height
 
     local track_height =
-        bar_y_bottom - bar_y_top + 1
+        bar_y_bottom
+        - bar_y_top
+        + 1
 
     local thumb_height =
         math.max(
@@ -986,15 +845,12 @@ local function drawScrollbarQueue()
     local max_thumb_offset =
         track_height - thumb_height
 
-    local thumb_offset = 0
-
-    if queue_max_scroll > 0 then
-        thumb_offset =
-            math.floor(
-                (queue_scroll / queue_max_scroll)
-                * max_thumb_offset
-            )
-    end
+    local thumb_offset =
+        math.floor(
+            (queue_scroll
+            / queue_max_scroll)
+            * max_thumb_offset
+        )
 
     for y = bar_y_top, bar_y_bottom do
 
@@ -1012,7 +868,8 @@ local function drawScrollbarQueue()
 
     for y =
         bar_y_top + thumb_offset,
-        bar_y_top + thumb_offset + thumb_height - 1 do
+        bar_y_top + thumb_offset
+        + thumb_height - 1 do
 
         term.setCursorPos(
             bar_x,
@@ -1030,10 +887,6 @@ local function drawScrollbarQueue()
         colors.black
     )
 end
-
------------------------------
--- TAPE PROGRESS
------------------------------
 
 local function drawTapeProgress()
 
@@ -1108,10 +961,6 @@ local function drawTapeProgress()
     )
 end
 
------------------------------
--- METADATA
------------------------------
-
 local function drawMetadataPanel()
 
     if not tape then
@@ -1148,7 +997,8 @@ local function drawMetadataPanel()
     if size > 0 then
         pct =
             math.floor(
-                (pos / size) * 100
+                (pos / size)
+                * 100
             )
     end
 
@@ -1161,7 +1011,7 @@ local function drawMetadataPanel()
 end
 
 -----------------------------
--- SEARCH SCREEN
+-- DRAW SCREENS
 -----------------------------
 
 local function drawSearch()
@@ -1239,7 +1089,9 @@ local function drawSearch()
                 local max_name_width =
                     width - 4
 
-                if #name > max_name_width then
+                if #name >
+                   max_name_width then
+
                     name =
                         name:sub(
                             1,
@@ -1249,7 +1101,6 @@ local function drawSearch()
 
                 term.write(name)
 
-                -- Playlist +
                 term.setCursorPos(
                     width - 2,
                     y_name
@@ -1281,7 +1132,8 @@ local function drawSearch()
                 local max_artist_width =
                     width - 4
 
-                if #artist > max_artist_width then
+                if #artist >
+                   max_artist_width then
 
                     artist =
                         artist:sub(
@@ -1344,10 +1196,6 @@ local function drawSearch()
         end
     end
 end
-
------------------------------
--- PLAYLIST SCREEN
------------------------------
 
 local function drawPlaylist()
 
@@ -1454,10 +1302,6 @@ local function drawPlaylist()
     drawScrollbarPlaylist()
 end
 
------------------------------
--- QUEUE SCREEN
------------------------------
-
 local function drawQueue()
 
     term.setBackgroundColor(
@@ -1475,7 +1319,9 @@ local function drawQueue()
 
     term.write(
         "Queue (? ? ?)  Autoplay: "
-        .. (autoplay_next and "ON" or "OFF")
+        .. (autoplay_next
+            and "ON"
+            or "OFF")
     )
 
     if #tape_queue == 0 then
@@ -1565,7 +1411,7 @@ local function drawQueue()
 end
 
 -----------------------------
--- WRITE AUDIO TO TAPE
+-- TAPE OPERATIONS
 -----------------------------
 
 local function write_url_to_tape(url)
@@ -1659,7 +1505,9 @@ local function write_url_to_tape(url)
     local name =
         read()
 
-    tape.setLabel(name)
+    tape.setLabel(
+        name
+    )
 
     term.setCursorPos(
         2,
@@ -1676,62 +1524,6 @@ local function write_url_to_tape(url)
 
     sleep(1.5)
 end
-
------------------------------
--- LOAD RESULT ONTO TAPE
------------------------------
-
-local function loadResultOnTape(result)
-
-    if not result or not tape then
-        return false
-    end
-
-    local url =
-        build_download_url(result)
-
-    if not url then
-        return false
-    end
-
-    local response =
-        http.get(
-            url,
-            nil,
-            true
-        )
-
-    if not response then
-        return false
-    end
-
-    tape.seek(
-        -999999999999
-    )
-
-    tape.write(
-        response.readAll()
-    )
-
-    response.close()
-
-    tape.setLabel(
-        result.name
-        or "Unknown"
-    )
-
-    tape.seek(
-        -999999999999
-    )
-
-    tape.play()
-
-    return true
-end
-
------------------------------
--- AUTOPLAY NEXT
------------------------------
 
 local function autoplayNextTrack()
 
@@ -1760,7 +1552,9 @@ local function autoplayNextTrack()
     end
 
     local url =
-        build_download_url(result)
+        build_download_url(
+            result
+        )
 
     if not url or not tape then
         return
@@ -1800,152 +1594,7 @@ local function autoplayNextTrack()
 end
 
 -----------------------------
--- START VIDEO FOR RESULT
------------------------------
-
-local function startVideoForResult(result)
-
-    if not result then
-        return
-    end
-
-    local video_source =
-        result.url
-        or result.id
-
-    if not video_source then
-        return
-    end
-
-    if not video_monitor then
-
-        term.setCursorPos(
-            2,
-            2
-        )
-
-        term.setTextColor(
-            colors.red
-        )
-
-        term.write(
-            "No monitor found"
-        )
-
-        sleep(1.5)
-
-        return
-    end
-
-    -----------------------------
-    -- STOP PREVIOUS VIDEO
-    -----------------------------
-
-    stopVideoStream()
-
-    playingVideo = false
-    currentVideo = nil
-    last_rendered_frame = nil
-    audioPosition = 0
-
-    -----------------------------
-    -- MONITOR RESOLUTION
-    -----------------------------
-
-    local video_width,
-          video_height =
-        video_monitor.getSize()
-
-    video_width =
-        math.min(
-            video_width,
-            128
-        )
-
-    video_height =
-        math.min(
-            video_height,
-            72
-        )
-
-    -----------------------------
-    -- BUILD NFV URL
-    -----------------------------
-
-    local video_url =
-        backend_video_url
-        .. textutils.urlEncode(
-            tostring(video_source)
-        )
-        .. "&resolution="
-        .. video_width
-        .. "x"
-        .. video_height
-        .. "&fps="
-        .. video_fps
-
-    -----------------------------
-    -- OPEN STREAM
-    -----------------------------
-
-    local streamedVideo,
-          stream_error =
-        streamNFV(video_url)
-
-    if not streamedVideo then
-
-        term.setCursorPos(
-            2,
-            2
-        )
-
-        term.setTextColor(
-            colors.red
-        )
-
-        term.write(
-            "Video error: "
-            .. tostring(stream_error)
-        )
-
-        sleep(1.5)
-
-        return
-    end
-
-    -----------------------------
-    -- START VIDEO IMMEDIATELY
-    -----------------------------
-
-    currentVideo =
-        streamedVideo
-
-    playingVideo = true
-
-    -----------------------------
-    -- WAIT BRIEFLY FOR FIRST FRAME
-    -----------------------------
-
-    local timeout =
-        os.epoch("utc") + 2000
-
-    while currentVideo
-        and currentVideo.last_frame < 1
-        and video_streaming
-        and os.epoch("utc") < timeout do
-
-        sleep(0)
-    end
-
-    -----------------------------
-    -- FIRST FRAME
-    -----------------------------
-
-    renderCurrentVideoFrame()
-end
-
------------------------------
--- REDRAW SCREEN
+-- MAIN REDRAW
 -----------------------------
 
 local function redrawScreen()
@@ -1954,17 +1603,15 @@ local function redrawScreen()
         return
     end
 
-    term.setCursorBlink(false)
+    term.setCursorBlink(
+        false
+    )
 
     term.setBackgroundColor(
         colors.black
     )
 
     term.clear()
-
-    -----------------------------
-    -- CLOSE X
-    -----------------------------
 
     term.setCursorPos(
         width,
@@ -1977,10 +1624,6 @@ local function redrawScreen()
 
     write("X")
 
-    -----------------------------
-    -- TAB BAR
-    -----------------------------
-
     term.setCursorPos(
         1,
         1
@@ -1992,10 +1635,6 @@ local function redrawScreen()
 
     term.clearLine()
 
-    -----------------------------
-    -- PLAY LABEL
-    -----------------------------
-
     local playLabel =
         " play "
 
@@ -2006,10 +1645,6 @@ local function redrawScreen()
         playLabel =
             " pause "
     end
-
-    -----------------------------
-    -- TABS
-    -----------------------------
 
     local tabs = {
         " Search ",
@@ -2069,8 +1704,13 @@ local function redrawScreen()
             fg = colors.black
         end
 
-        term.setBackgroundColor(bg)
-        term.setTextColor(fg)
+        term.setBackgroundColor(
+            bg
+        )
+
+        term.setTextColor(
+            fg
+        )
 
         local pos =
             (
@@ -2102,10 +1742,6 @@ local function redrawScreen()
         colors.white
     )
 
-    -----------------------------
-    -- CONTENT
-    -----------------------------
-
     if tab == 1 then
 
         drawSearch()
@@ -2133,10 +1769,6 @@ local function uiLoop()
         if restart_requested then
             return
         end
-
-        -----------------------------
-        -- SEARCH INPUT
-        -----------------------------
 
         if waiting_for_input then
 
@@ -2252,10 +1884,6 @@ local function uiLoop()
                           y =
                         os.pullEvent()
 
-                    -----------------------------
-                    -- UPDATE KEY
-                    -----------------------------
-
                     local update_key =
                         event == "key"
                         and p1 == keys.u
@@ -2319,13 +1947,8 @@ local function uiLoop()
                         end
 
                         redrawScreen()
-
                         return
                     end
-
-                    -----------------------------
-                    -- TAPE END
-                    -----------------------------
 
                     if tape
                         and tape.isPlaying
@@ -2358,9 +1981,7 @@ local function uiLoop()
                         redrawScreen()
                     end
 
-                    -----------------------------
-                    -- SCROLL
-                    -----------------------------
+                    -- SCROLL HANDLING
 
                     if event == "mouse_scroll" then
 
@@ -2375,7 +1996,9 @@ local function uiLoop()
                                 search_scroll = 0
                             end
 
-                            if search_scroll > max_scroll then
+                            if search_scroll >
+                               max_scroll then
+
                                 search_scroll =
                                     max_scroll
                             end
@@ -2393,7 +2016,9 @@ local function uiLoop()
                                 playlist_scroll = 0
                             end
 
-                            if playlist_scroll > playlist_max_scroll then
+                            if playlist_scroll >
+                               playlist_max_scroll then
+
                                 playlist_scroll =
                                     playlist_max_scroll
                             end
@@ -2411,7 +2036,9 @@ local function uiLoop()
                                 queue_scroll = 0
                             end
 
-                            if queue_scroll > queue_max_scroll then
+                            if queue_scroll >
+                               queue_max_scroll then
+
                                 queue_scroll =
                                     queue_max_scroll
                             end
@@ -2420,17 +2047,13 @@ local function uiLoop()
                         end
                     end
 
-                    -----------------------------
-                    -- CLICK
-                    -----------------------------
+                    -- CLICK HANDLING
 
                     if event == "mouse_click" then
 
                         local button = p1
 
-                        -----------------------------
-                        -- TAB BAR
-                        -----------------------------
+                        -- TAB BAR CLICK
 
                         if y == 1 then
 
@@ -2438,10 +2061,6 @@ local function uiLoop()
                                 math.ceil(
                                     (x / width) * 7
                                 )
-
-                            -----------------------------
-                            -- SEARCH / PLAYLIST / QUEUE
-                            -----------------------------
 
                             if zone == 1
                                 or zone == 2
@@ -2454,9 +2073,7 @@ local function uiLoop()
                                 return
                             end
 
-                            -----------------------------
                             -- PLAY / PAUSE
-                            -----------------------------
 
                             if zone == 4
                                 and tape then
@@ -2464,12 +2081,10 @@ local function uiLoop()
                                 if tape.isPlaying
                                     and tape.isPlaying() then
 
-                                    -- Pause.
                                     tape.stop()
 
                                 else
 
-                                    -- Resume.
                                     tape.play()
                                 end
 
@@ -2478,20 +2093,18 @@ local function uiLoop()
                                 return
                             end
 
-                            -----------------------------
-                            -- STOP / REWIND
-                            -----------------------------
+                            -- STOP = REWIND
 
                             if zone == 5
                                 and tape then
 
                                 tape.stop()
 
+                                stopVideoStream()
+
                                 tape.seek(
                                     -99999999999
                                 )
-
-                                stopVideoStream()
 
                                 playingVideo =
                                     false
@@ -2502,17 +2115,12 @@ local function uiLoop()
                                 audioPosition =
                                     0
 
-                                last_rendered_frame =
-                                    nil
-
                                 redrawScreen()
 
                                 return
                             end
 
-                            -----------------------------
-                            -- NEXT
-                            -----------------------------
+                            -- NEXT BUTTON
 
                             if zone == 6 then
 
@@ -2526,7 +2134,8 @@ local function uiLoop()
                                         1
                                     )
 
-                                    if result.type == "playlist"
+                                    if result.type ==
+                                        "playlist"
                                         and result.playlist_items
                                         and result.playlist_items[1] then
 
@@ -2539,8 +2148,7 @@ local function uiLoop()
                                             result
                                         )
 
-                                    if url
-                                        and tape then
+                                    if url and tape then
 
                                         stopVideoStream()
 
@@ -2574,7 +2182,6 @@ local function uiLoop()
                                             )
 
                                             response.close()
-
                                         end
 
                                         tape.setLabel(
@@ -2587,12 +2194,6 @@ local function uiLoop()
                                         )
 
                                         tape.play()
-
-                                        -- Start video in parallel
-                                        -- with the newly loaded tape.
-                                        startVideoForResult(
-                                            result
-                                        )
                                     end
                                 end
 
@@ -2601,12 +2202,12 @@ local function uiLoop()
                                 return
                             end
 
-                            -----------------------------
                             -- WIPE
-                            -----------------------------
 
                             if zone == 7
                                 and tape then
+
+                                stopVideoStream()
 
                                 tape.seek(
                                     -99999999999
@@ -2623,33 +2224,21 @@ local function uiLoop()
                                     -99999999999
                                 )
 
-                                stopVideoStream()
-
-                                playingVideo =
-                                    false
-
-                                currentVideo =
-                                    nil
-
-                                last_rendered_frame =
-                                    nil
-
                                 redrawScreen()
 
                                 return
                             end
                         end
 
-                        -----------------------------
-                        -- PROGRESS SEEK
-                        -----------------------------
+                        -- PROGRESS BAR SEEK
 
                         if tab == 1
                             and y == 6
                             and tape then
 
                             local bar_x = 2
-                            local bar_w = width - 3
+                            local bar_w =
+                                width - 3
 
                             if x >= bar_x
                                 and x <= bar_x + bar_w then
@@ -2679,7 +2268,8 @@ local function uiLoop()
                                     tape.getPosition()
 
                                 tape.seek(
-                                    target - current
+                                    target
+                                    - current
                                 )
 
                                 redrawScreen()
@@ -2688,9 +2278,7 @@ local function uiLoop()
                             end
                         end
 
-                        -----------------------------
-                        -- SEARCH BAR
-                        -----------------------------
+                        -- SEARCH BAR CLICK
 
                         if tab == 1
                             and y >= 3
@@ -2714,9 +2302,7 @@ local function uiLoop()
                             return
                         end
 
-                        -----------------------------
-                        -- SEARCH RESULTS
-                        -----------------------------
+                        -- SEARCH RESULTS CLICK
 
                         if tab == 1
                             and search_results then
@@ -2740,21 +2326,14 @@ local function uiLoop()
                                     local result =
                                         search_results[i]
 
-                                    -----------------------------
-                                    -- PLAYLIST RESULT
-                                    -----------------------------
-
-                                    if result.type == "playlist"
-                                        and result.playlist_items
-                                        and result.playlist_items[1] then
+                                    if result.type ==
+                                        "playlist" then
 
                                         result =
                                             result.playlist_items[1]
                                     end
 
-                                    -----------------------------
-                                    -- ADD TO PLAYLIST
-                                    -----------------------------
+                                    -- + BUTTON
 
                                     if y == y_name
                                         and x == width - 2 then
@@ -2769,9 +2348,7 @@ local function uiLoop()
                                         return
                                     end
 
-                                    -----------------------------
                                     -- RIGHT CLICK = QUEUE
-                                    -----------------------------
 
                                     if button == 2 then
 
@@ -2785,15 +2362,9 @@ local function uiLoop()
                                         return
                                     end
 
-                                    -----------------------------
                                     -- LEFT CLICK = PLAY
-                                    -----------------------------
 
                                     if button == 1 then
-
-                                        -----------------------------
-                                        -- STOP OLD VIDEO
-                                        -----------------------------
 
                                         stopVideoStream()
 
@@ -2809,17 +2380,16 @@ local function uiLoop()
                                         last_rendered_frame =
                                             nil
 
-                                        -----------------------------
-                                        -- AUDIO
-                                        -----------------------------
-
                                         local url =
                                             build_download_url(
                                                 result
                                             )
 
-                                        if url
-                                            and tape then
+                                        if url and tape then
+
+                                            -- Download audio first.
+                                            -- Audio remains stopped while
+                                            -- video is being prepared.
 
                                             tape.seek(
                                                 -999999999999999
@@ -2851,16 +2421,121 @@ local function uiLoop()
                                                 -999999999999999
                                             )
 
-                                            tape.play()
+                                            local video_source =
+                                                result.url
+                                                or result.id
+
+                                            if video_source
+                                                and video_monitor then
+
+                                                local video_width,
+                                                      video_height =
+                                                    video_monitor.getSize()
+
+                                                video_width =
+                                                    math.min(
+                                                        video_width,
+                                                        128
+                                                    )
+
+                                                video_height =
+                                                    math.min(
+                                                        video_height,
+                                                        72
+                                                    )
+
+                                                local video_url =
+                                                    backend_video_url
+                                                    .. textutils.urlEncode(
+                                                        tostring(
+                                                            video_source
+                                                        )
+                                                    )
+                                                    .. "&resolution="
+                                                    .. video_width
+                                                    .. "x"
+                                                    .. video_height
+                                                    .. "&fps="
+                                                    .. video_fps
+
+                                                -- IMPORTANT:
+                                                -- Start video stream BEFORE
+                                                -- starting the tape.
+
+                                                local streamedVideo =
+                                                    streamNFV(
+                                                        video_url
+                                                    )
+
+                                                if streamedVideo then
+
+                                                    currentVideo =
+                                                        streamedVideo
+
+                                                    -- Wait for the first
+                                                    -- frames to arrive while
+                                                    -- the tape is still stopped.
+
+                                                    waitForVideoPrebuffer(
+                                                        currentVideo
+                                                    )
+
+                                                    -- Reset the audio clock
+                                                    -- immediately before start.
+
+                                                    tape.seek(
+                                                        -999999999999999
+                                                    )
+
+                                                    audioPosition =
+                                                        0
+
+                                                    last_rendered_frame =
+                                                        nil
+
+                                                    playingVideo =
+                                                        true
+
+                                                    -- Audio now starts at
+                                                    -- exactly the same logical
+                                                    -- zero point as video.
+
+                                                    tape.play()
+
+                                                    renderCurrentVideoFrame()
+
+                                                else
+
+                                                    -- If video could not
+                                                    -- start, audio still works.
+
+                                                    tape.play()
+                                                end
+
+                                            elseif not video_monitor then
+
+                                                tape.play()
+
+                                                term.setCursorPos(
+                                                    2,
+                                                    2
+                                                )
+
+                                                term.setTextColor(
+                                                    colors.red
+                                                )
+
+                                                term.write(
+                                                    "No monitor found"
+                                                )
+
+                                                sleep(1.5)
+
+                                            else
+
+                                                tape.play()
+                                            end
                                         end
-
-                                        -----------------------------
-                                        -- VIDEO
-                                        -----------------------------
-
-                                        startVideoForResult(
-                                            result
-                                        )
 
                                         redrawScreen()
 
@@ -2870,9 +2545,7 @@ local function uiLoop()
                             end
                         end
 
-                        -----------------------------
-                        -- PLAYLIST CONTROLS
-                        -----------------------------
+                        -- PLAYLIST TAB CLICK
 
                         if tab == 2 then
 
@@ -2887,9 +2560,11 @@ local function uiLoop()
                                         + (i - 1) * 2
                                         - playlist_scroll
 
-                                    if y == y_controls then
+                                    if y ==
+                                        y_controls then
 
-                                        -- Move up
+                                        -- MOVE UP
+
                                         if x == 2
                                             or x == 3 then
 
@@ -2902,11 +2577,13 @@ local function uiLoop()
                                             end
                                         end
 
-                                        -- Move down
+                                        -- MOVE DOWN
+
                                         if x == 4
                                             or x == 5 then
 
-                                            if i < #playlist then
+                                            if i <
+                                                #playlist then
 
                                                 playlist[i],
                                                 playlist[i + 1] =
@@ -2915,7 +2592,8 @@ local function uiLoop()
                                             end
                                         end
 
-                                        -- Remove
+                                        -- REMOVE
+
                                         if x == 6
                                             or x == 7 then
 
@@ -2933,9 +2611,7 @@ local function uiLoop()
                             end
                         end
 
-                        -----------------------------
-                        -- QUEUE CONTROLS
-                        -----------------------------
+                        -- QUEUE TAB CLICK
 
                         if tab == 3 then
 
@@ -2960,9 +2636,11 @@ local function uiLoop()
                                         + (i - 1) * 2
                                         - queue_scroll
 
-                                    if y == y_controls then
+                                    if y ==
+                                        y_controls then
 
-                                        -- Move up
+                                        -- MOVE UP
+
                                         if x == 2
                                             or x == 3 then
 
@@ -2975,11 +2653,13 @@ local function uiLoop()
                                             end
                                         end
 
-                                        -- Move down
+                                        -- MOVE DOWN
+
                                         if x == 4
                                             or x == 5 then
 
-                                            if i < #tape_queue then
+                                            if i <
+                                                #tape_queue then
 
                                                 tape_queue[i],
                                                 tape_queue[i + 1] =
@@ -2988,7 +2668,8 @@ local function uiLoop()
                                             end
                                         end
 
-                                        -- Remove
+                                        -- REMOVE
+
                                         if x == 6
                                             or x == 7 then
 
@@ -3008,15 +2689,12 @@ local function uiLoop()
                     end
                 end,
 
-                -----------------------------
-                -- REDRAW EVENT
-                -----------------------------
-
                 function()
 
-                    os.pullEvent(
-                        "redraw_screen"
-                    )
+                    local event =
+                        os.pullEvent(
+                            "redraw_screen"
+                        )
 
                     redrawScreen()
                 end
@@ -3035,10 +2713,6 @@ local function httpLoop()
 
         parallel.waitForAny(
 
-            -----------------------------
-            -- HTTP SUCCESS
-            -----------------------------
-
             function()
 
                 local event,
@@ -3048,7 +2722,8 @@ local function httpLoop()
                         "http_success"
                     )
 
-                if url == last_search_url then
+                if url ==
+                    last_search_url then
 
                     local body =
                         handle.readAll()
@@ -3061,7 +2736,9 @@ local function httpLoop()
                         )
 
                     search_results =
-                        filterPromo(raw)
+                        filterPromo(
+                            raw
+                        )
 
                     os.queueEvent(
                         "redraw_screen"
@@ -3071,10 +2748,6 @@ local function httpLoop()
                 end
             end,
 
-            -----------------------------
-            -- HTTP FAILURE
-            -----------------------------
-
             function()
 
                 local event,
@@ -3083,7 +2756,8 @@ local function httpLoop()
                         "http_failure"
                     )
 
-                if url == last_search_url then
+                if url ==
+                    last_search_url then
 
                     search_error =
                         true
@@ -3098,84 +2772,13 @@ local function httpLoop()
 end
 
 -----------------------------
--- VIDEO STREAM LOOP
---
--- This is the producer.
---
--- It continuously feeds the rolling
--- frame buffer independently from
--- monitor rendering.
------------------------------
-
-local function videoStreamLoop()
-
-    while true do
-
-        if video_stream_coroutine then
-
-            if coroutine.status(
-                video_stream_coroutine
-            ) == "dead" then
-
-                video_stream_coroutine =
-                    nil
-
-            else
-
-                local ok,
-                      err =
-                    coroutine.resume(
-                        video_stream_coroutine
-                    )
-
-                if not ok then
-
-                    if currentVideo then
-
-                        currentVideo.stream_error =
-                            tostring(err)
-
-                        currentVideo.finished =
-                            true
-                    end
-
-                    video_streaming =
-                        false
-
-                    if video_stream_handle then
-
-                        pcall(function()
-
-                            video_stream_handle.close()
-
-                        end)
-
-                        video_stream_handle =
-                            nil
-                    end
-
-                    video_stream_coroutine =
-                        nil
-                end
-            end
-        end
-
-        -----------------------------
-        -- Give other loops CPU time
-        -----------------------------
-
-        sleep(0)
-    end
-end
-
------------------------------
--- VIDEO RENDER LOOP
---
--- Runs independently from the
--- network producer.
+-- VIDEO LOOP
 -----------------------------
 
 local function videoLoop()
+
+    local frame_period_ms =
+        1000 / monitor_fps
 
     local next_frame_time =
         os.epoch("utc")
@@ -3186,16 +2789,10 @@ local function videoLoop()
             and currentVideo
             and tape then
 
-            -----------------------------
-            -- AUDIO POSITION
-            -----------------------------
+            -- Tape position is the master clock.
 
             audioPosition =
                 getAudioTime()
-
-            -----------------------------
-            -- RENDER
-            -----------------------------
 
             local rendered,
                   render_error =
@@ -3216,13 +2813,6 @@ local function videoLoop()
                     false
             end
 
-            -----------------------------
-            -- FRAME CLOCK
-            -----------------------------
-
-            local frame_period_ms =
-                1000 / monitor_fps
-
             next_frame_time =
                 next_frame_time
                 + frame_period_ms
@@ -3231,39 +2821,22 @@ local function videoLoop()
                 os.epoch("utc")
 
             local wait_time =
-                next_frame_time - now
-
-            -----------------------------
-            -- WAIT
-            -----------------------------
+                next_frame_time
+                - now
 
             if wait_time > 0 then
 
-                parallel.waitForAny(
+                -- Do not wake up for every
+                -- incoming video frame.
+                --
+                -- The video producer continues
+                -- independently through videoStreamLoop.
 
-                    function()
-
-                        sleep(
-                            wait_time / 1000
-                        )
-                    end,
-
-                    function()
-
-                        os.pullEvent(
-                            video_buffer_event
-                        )
-                    end
+                sleep(
+                    wait_time / 1000
                 )
 
             else
-
-                -- Renderer is behind.
-                --
-                -- Don't attempt to catch up by
-                -- rendering every missed frame.
-                -- Jump directly to the frame
-                -- matching the tape position.
 
                 next_frame_time =
                     now
@@ -3274,7 +2847,9 @@ local function videoLoop()
             next_frame_time =
                 os.epoch("utc")
 
-            sleep(0.01)
+            sleep(
+                0.05
+            )
         end
     end
 end
@@ -3289,28 +2864,6 @@ parallel.waitForAny(
     videoLoop,
     videoStreamLoop
 )
-
------------------------------
--- EXIT CLEANUP
------------------------------
-
-stopVideoStream()
-
-if tape then
-    pcall(function()
-        tape.stop()
-    end)
-end
-
-if video_monitor then
-    pcall(function()
-        video_monitor.setBackgroundColor(
-            colors.black
-        )
-
-        video_monitor.clear()
-    end)
-end
 
 term.setBackgroundColor(
     colors.black
