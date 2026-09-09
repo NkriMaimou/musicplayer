@@ -1,0 +1,1882 @@
+-- ============================================================
+-- MUSICA - CC:TWEAKED YOUTUBE TAPE + NFP VIDEO PLAYER
+-- ============================================================
+
+local api_base_url = "https://ipod-2to6magyna-uc.a.run.app/"
+local version = "2.1"
+
+local backend_url =
+    "https://m9poyt8hx6hn.share.zrok.io/convert?url="
+
+local backend_video_url =
+    "https://m9poyt8hx6hn.share.zrok.io/convertVideo?url="
+
+local player_update_url =
+    "https://m9poyt8hx6hn.share.zrok.io/musica.lua"
+
+
+-- ============================================================
+-- TERMINAL
+-- ============================================================
+
+local width, height = term.getSize()
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)
+
+
+-- ============================================================
+-- PERIPHERALS
+-- ============================================================
+
+local tape = peripheral.find("tape_drive")
+local video_monitor = peripheral.find("monitor")
+
+if not tape then
+    print("ERROR: No tape drive found.")
+    return
+end
+
+if video_monitor then
+    video_monitor.setTextScale(0.5)
+    video_monitor.setBackgroundColor(colors.black)
+    video_monitor.clear()
+end
+
+
+-- ============================================================
+-- STATE
+-- ============================================================
+
+local active_tab = 1
+
+local tabs = {
+    "Search",
+    "Playlist",
+    "Queue"
+}
+
+local search_text = ""
+local search_results = {}
+
+local playlist = {}
+local queue = {}
+
+local playlist_scroll = 1
+local queue_scroll = 1
+local search_scroll = 1
+
+local autoplay = true
+
+local current_track = nil
+local currentVideo = nil
+
+local playingVideo = false
+local lastVideoFrame = -1
+
+local searching = false
+local playing = false
+local restart_requested = false
+
+
+-- ============================================================
+-- UTILITY
+-- ============================================================
+
+local function safeUrlEncode(value)
+    if not value then
+        return ""
+    end
+
+    return textutils.urlEncode(tostring(value))
+end
+
+
+local function getTrackURL(track)
+    if type(track) ~= "table" then
+        return nil
+    end
+
+    return track.url or track.webpage_url or track.id
+end
+
+
+local function getTrackName(track)
+    if not track then
+        return "Unknown"
+    end
+
+    return track.title or track.name or "Unknown"
+end
+
+
+local function getTrackArtist(track)
+    if not track then
+        return ""
+    end
+
+    return track.artist
+        or track.uploader
+        or track.channel
+        or ""
+end
+
+
+local function clamp(value, minimum, maximum)
+    if value < minimum then
+        return minimum
+    end
+
+    if value > maximum then
+        return maximum
+    end
+
+    return value
+end
+
+
+-- ============================================================
+-- SCREEN
+-- ============================================================
+
+local function drawHeader()
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+
+    term.setCursorPos(1, 1)
+    term.clearLine()
+
+    term.setTextColor(colors.red)
+    term.write("MUSICA")
+
+    term.setTextColor(colors.gray)
+
+    local title = current_track and getTrackName(current_track) or "No track"
+
+    if #title > width - 8 then
+        title = title:sub(1, width - 11) .. "..."
+    end
+
+    term.setCursorPos(
+        math.max(8, width - #title),
+        1
+    )
+
+    term.write(title)
+end
+
+
+local function drawTabs()
+    local y = 2
+
+    term.setCursorPos(1, y)
+    term.clearLine()
+
+    local x = 1
+
+    for i, tab in ipairs(tabs) do
+        if i == active_tab then
+            term.setBackgroundColor(colors.gray)
+            term.setTextColor(colors.black)
+        else
+            term.setBackgroundColor(colors.black)
+            term.setTextColor(colors.white)
+        end
+
+        term.setCursorPos(x, y)
+        term.write(" " .. tab .. " ")
+
+        x = x + #tab + 2
+    end
+
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+end
+
+
+local function drawTapeProgress()
+    local y = height
+
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.gray)
+
+    term.setCursorPos(1, y)
+    term.clearLine()
+
+    local size = tape.getSize() or 0
+    local pos = tape.getPosition() or 0
+
+    local percent = 0
+
+    if size > 0 then
+        percent = clamp(pos / size, 0, 1)
+    end
+
+    local barWidth = math.max(10, width - 12)
+    local filled = math.floor(barWidth * percent)
+
+    term.setCursorPos(1, y)
+    term.write("[")
+
+    if filled > 0 then
+        term.write(string.rep("=", filled))
+    end
+
+    if filled < barWidth then
+        term.write(string.rep("-", barWidth - filled))
+    end
+
+    term.write("]")
+
+    term.setCursorPos(width - 8, y)
+    term.write(string.format("%3d%%", math.floor(percent * 100)))
+end
+
+
+-- ============================================================
+-- SEARCH
+-- ============================================================
+
+local function filterPromo(results)
+    local output = {}
+
+    if type(results) ~= "table" then
+        return output
+    end
+
+    for _, result in ipairs(results) do
+        if type(result) == "table" then
+            local title = tostring(
+                result.title
+                or result.name
+                or ""
+            ):lower()
+
+            if not title:find("sponsored", 1, true)
+                and not title:find("promoted", 1, true) then
+
+                table.insert(output, result)
+            end
+        end
+    end
+
+    return output
+end
+
+
+local function performSearch(query)
+    searching = true
+    search_results = {}
+    search_scroll = 1
+
+    local url =
+        api_base_url
+        .. "?query="
+        .. safeUrlEncode(query)
+
+    http.request(url)
+
+    while searching do
+        local event, a, b = os.pullEvent()
+
+        if event == "http_success" and a == url then
+            local response = a
+            local handle = b
+
+            local body = handle.readAll()
+            handle.close()
+
+            local ok, data =
+                pcall(textutils.unserialiseJSON, body)
+
+            if ok and type(data) == "table" then
+                search_results = filterPromo(
+                    data.results or data
+                )
+            end
+
+            searching = false
+
+        elseif event == "http_failure" and a == url then
+            searching = false
+
+            term.setCursorPos(1, 5)
+            term.setTextColor(colors.red)
+            term.write("Search failed.")
+            sleep(1)
+        end
+    end
+end
+
+
+local function drawSearch()
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+
+    term.setCursorPos(1, 4)
+    term.clearLine()
+
+    term.setTextColor(colors.gray)
+    term.write("Search: ")
+
+    term.setTextColor(colors.white)
+    term.write(search_text)
+
+    local startY = 6
+    local maxRows = height - 7
+
+    if #search_results == 0 then
+        term.setCursorPos(1, startY)
+
+        if searching then
+            term.setTextColor(colors.yellow)
+            term.write("Searching...")
+        else
+            term.setTextColor(colors.gray)
+            term.write("Type a search and press Enter.")
+        end
+
+        return
+    end
+
+    for row = 0, maxRows - 1 do
+        local index = search_scroll + row
+
+        if index > #search_results then
+            break
+        end
+
+        local result = search_results[index]
+
+        local name = getTrackName(result)
+        local artist = getTrackArtist(result)
+
+        local line =
+            tostring(name)
+            .. " - "
+            .. tostring(artist)
+
+        local available =
+            width - 4
+
+        if #line > available then
+            line = line:sub(1, available - 3) .. "..."
+        end
+
+        term.setCursorPos(1, startY + row)
+        term.setTextColor(colors.white)
+
+        term.write(
+            string.format(
+                "%2d %s",
+                index,
+                line
+            )
+        )
+
+        term.setCursorPos(width - 1, startY + row)
+        term.setTextColor(colors.lime)
+        term.write("+")
+    end
+end
+
+
+-- ============================================================
+-- PLAYLIST
+-- ============================================================
+
+local function drawPlaylist()
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+
+    term.setCursorPos(1, 4)
+    term.clearLine()
+
+    term.write("Playlist  (^ v x)")
+
+    local startY = 6
+    local maxRows = height - 7
+
+    for row = 0, maxRows - 1 do
+        local index = playlist_scroll + row
+
+        if index > #playlist then
+            break
+        end
+
+        local track = playlist[index]
+
+        local name = getTrackName(track)
+
+        if #name > width - 10 then
+            name = name:sub(1, width - 13) .. "..."
+        end
+
+        term.setCursorPos(1, startY + row)
+        term.setTextColor(colors.white)
+
+        term.write(
+            string.format(
+                "%2d %s",
+                index,
+                name
+            )
+        )
+
+        term.setCursorPos(width - 7, startY + row)
+        term.setTextColor(colors.yellow)
+        term.write("^")
+
+        term.setCursorPos(width - 5, startY + row)
+        term.write("v")
+
+        term.setCursorPos(width - 2, startY + row)
+        term.setTextColor(colors.red)
+        term.write("x")
+    end
+end
+
+
+-- ============================================================
+-- QUEUE
+-- ============================================================
+
+local function drawQueue()
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+
+    term.setCursorPos(1, 4)
+    term.clearLine()
+
+    local autoText =
+        autoplay and "ON" or "OFF"
+
+    term.write(
+        "Queue (^ v x)  Autoplay: "
+        .. autoText
+    )
+
+    local startY = 6
+    local maxRows = height - 7
+
+    for row = 0, maxRows - 1 do
+        local index = queue_scroll + row
+
+        if index > #queue then
+            break
+        end
+
+        local track = queue[index]
+
+        local name = getTrackName(track)
+
+        if #name > width - 10 then
+            name = name:sub(1, width - 13) .. "..."
+        end
+
+        term.setCursorPos(1, startY + row)
+        term.setTextColor(colors.white)
+
+        term.write(
+            string.format(
+                "%2d %s",
+                index,
+                name
+            )
+        )
+
+        term.setCursorPos(width - 7, startY + row)
+        term.setTextColor(colors.yellow)
+        term.write("^")
+
+        term.setCursorPos(width - 5, startY + row)
+        term.write("v")
+
+        term.setCursorPos(width - 2, startY + row)
+        term.setTextColor(colors.red)
+        term.write("x")
+    end
+end
+
+
+-- ============================================================
+-- VIDEO
+-- ============================================================
+
+local function clearVideo()
+    currentVideo = nil
+    playingVideo = false
+    lastVideoFrame = -1
+
+    if video_monitor then
+        video_monitor.setBackgroundColor(colors.black)
+        video_monitor.clear()
+    end
+end
+
+
+local function parseNFV(data)
+    if type(data) ~= "string" then
+        return nil, "Invalid video data."
+    end
+
+    local lines = {}
+
+    for line in data:gmatch("[^\r\n]+") do
+        table.insert(lines, line)
+    end
+
+    if #lines < 2 then
+        return nil, "Video contains no frames."
+    end
+
+    local w, h, fps =
+        lines[1]:match(
+            "^(%d+)%s+(%d+)%s+([%d%.]+)$"
+        )
+
+    w = tonumber(w)
+    h = tonumber(h)
+    fps = tonumber(fps)
+
+    if not w or not h or not fps then
+        return nil, "Invalid NFV header."
+    end
+
+    if w <= 0 or h <= 0 or fps <= 0 then
+        return nil, "Invalid NFV dimensions."
+    end
+
+    local frames = {}
+
+    for i = 2, #lines do
+        local frame = lines[i]
+
+        if #frame >= w * h then
+            frame = frame:sub(1, w * h)
+            table.insert(frames, frame)
+        end
+    end
+
+    if #frames == 0 then
+        return nil, "No valid video frames."
+    end
+
+    return {
+        width = w,
+        height = h,
+        fps = fps,
+        frames = frames
+    }
+end
+
+
+local function drawNFVFrame(video, frameIndex)
+    if not video_monitor then
+        return
+    end
+
+    if not video then
+        return
+    end
+
+    frameIndex =
+        clamp(
+            frameIndex,
+            1,
+            #video.frames
+        )
+
+    local frame =
+        video.frames[frameIndex]
+
+    if not frame then
+        return
+    end
+
+    local w = video.width
+    local h = video.height
+
+    -- The backend already returns NFP hex colors:
+    -- 0 1 2 3 4 5 6 7 8 9 a b c d e f
+    --
+    -- DO NOT convert #/. here.
+    --
+    -- Spaces as foreground + NFP colors as background
+    -- gives full-cell colored pixels.
+
+    local textLine = string.rep(" ", w)
+    local foreground = string.rep("0", w)
+
+    video_monitor.setBackgroundColor(colors.black)
+
+    for y = 1, h do
+        local offset = (y - 1) * w
+
+        local row =
+            frame:sub(
+                offset + 1,
+                offset + w
+            )
+
+        if #row < w then
+            row =
+                row
+                .. string.rep(
+                    "0",
+                    w - #row
+                )
+        end
+
+        video_monitor.setCursorPos(1, y)
+
+        video_monitor.blit(
+            textLine,
+            foreground,
+            row
+        )
+    end
+end
+
+
+-- ============================================================
+-- VIDEO DOWNLOAD
+-- ============================================================
+
+local function downloadVideo(source)
+    if not video_monitor then
+        return nil
+    end
+
+    if not source then
+        return nil, "No video source."
+    end
+
+    local mw, mh =
+        video_monitor.getSize()
+
+    -- 12 FPS is intentional:
+    -- enough for smooth CC monitor playback
+    -- without making the NFV enormous.
+    local fps = 12
+
+    local url =
+        backend_video_url
+        .. safeUrlEncode(source)
+        .. "&resolution="
+        .. tostring(mw)
+        .. "x"
+        .. tostring(mh)
+        .. "&fps="
+        .. tostring(fps)
+
+    local response, err =
+        http.get(
+            url,
+            nil,
+            true
+        )
+
+    if not response then
+        return nil,
+            "Video HTTP error: "
+            .. tostring(err)
+    end
+
+    local data = response.readAll()
+    response.close()
+
+    if not data or #data == 0 then
+        return nil, "Empty video response."
+    end
+
+    local video, parseError =
+        parseNFV(data)
+
+    if not video then
+        return nil, parseError
+    end
+
+    return video
+end
+
+
+-- ============================================================
+-- AUDIO DOWNLOAD
+-- ============================================================
+
+local function downloadAudio(source)
+    if not source then
+        return nil, "No audio source."
+    end
+
+    local url =
+        backend_url
+        .. safeUrlEncode(source)
+
+    local response, err =
+        http.get(
+            url,
+            nil,
+            true
+        )
+
+    if not response then
+        return nil,
+            "Audio HTTP error: "
+            .. tostring(err)
+    end
+
+    local data = response.readAll()
+    response.close()
+
+    if not data or #data == 0 then
+        return nil, "Empty audio response."
+    end
+
+    return data
+end
+
+
+-- ============================================================
+-- TAPE
+-- ============================================================
+
+local function rewindTape()
+    tape.stop()
+
+    -- CC:Tweaked tape drives accept relative seek values.
+    -- A very large negative seek safely returns to the beginning.
+    pcall(function()
+        tape.seek(-tape.getSize())
+    end)
+
+    -- Extra protection.
+    pcall(function()
+        tape.seek(-1000000000)
+    end)
+end
+
+
+local function writeAudioToTape(data)
+    if not data then
+        return false, "No audio data."
+    end
+
+    local tapeSize =
+        tape.getSize() or 0
+
+    if #data > tapeSize then
+        return false,
+            string.format(
+                "Audio is too large for tape (%d > %d bytes).",
+                #data,
+                tapeSize
+            )
+    end
+
+    rewindTape()
+
+    local ok, result =
+        pcall(function()
+            return tape.write(data)
+        end)
+
+    if not ok then
+        return false,
+            "Tape write failed: "
+            .. tostring(result)
+    end
+
+    rewindTape()
+
+    return true
+end
+
+
+-- ============================================================
+-- PLAY RESULT
+--
+-- THIS IS THE IMPORTANT PART.
+--
+-- A search-result left click comes here.
+--
+-- Audio and video are loaded BEFORE tape.play().
+-- This prevents the video from starting several seconds
+-- behind the audio while /convertVideo is downloading.
+-- ============================================================
+
+local function playResult(result)
+    if type(result) ~= "table" then
+        return false
+    end
+
+    local source =
+        getTrackURL(result)
+
+    if not source then
+        term.setTextColor(colors.red)
+        term.setCursorPos(1, 4)
+        term.clearLine()
+        term.write("No URL found for this result.")
+        sleep(2)
+        return false
+    end
+
+    -- Stop everything currently playing.
+    tape.stop()
+    clearVideo()
+
+    playing = false
+    current_track = result
+
+    drawHeader()
+
+    ------------------------------------------------------------
+    -- AUDIO
+    ------------------------------------------------------------
+
+    term.setCursorPos(1, 4)
+    term.clearLine()
+
+    term.setTextColor(colors.yellow)
+    term.write("Downloading audio...")
+
+    local audioData, audioError =
+        downloadAudio(source)
+
+    if not audioData then
+        term.setTextColor(colors.red)
+        term.setCursorPos(1, 5)
+        term.clearLine()
+        term.write(
+            tostring(audioError)
+        )
+
+        sleep(3)
+
+        return false
+    end
+
+    ------------------------------------------------------------
+    -- WRITE AUDIO TO TAPE
+    ------------------------------------------------------------
+
+    term.setCursorPos(1, 4)
+    term.clearLine()
+
+    term.setTextColor(colors.yellow)
+    term.write("Writing audio to tape...")
+
+    local written, writeError =
+        writeAudioToTape(audioData)
+
+    if not written then
+        term.setTextColor(colors.red)
+        term.setCursorPos(1, 5)
+        term.clearLine()
+        term.write(
+            tostring(writeError)
+        )
+
+        sleep(3)
+
+        return false
+    end
+
+    ------------------------------------------------------------
+    -- VIDEO
+    ------------------------------------------------------------
+
+    local video = nil
+
+    if video_monitor then
+        term.setCursorPos(1, 4)
+        term.clearLine()
+
+        term.setTextColor(colors.yellow)
+        term.write("Loading synchronized video...")
+
+        local videoError
+
+        video, videoError =
+            downloadVideo(source)
+
+        if not video then
+            -- Audio should still work if video fails.
+            term.setCursorPos(1, 5)
+            term.clearLine()
+
+            term.setTextColor(colors.red)
+            term.write(
+                "Video unavailable: "
+                .. tostring(videoError)
+            )
+
+            sleep(1)
+        end
+    end
+
+    ------------------------------------------------------------
+    -- BOTH ARE READY
+    ------------------------------------------------------------
+
+    currentVideo = video
+
+    rewindTape()
+
+    -- Start audio FIRST/IMMEDIATELY after everything is ready.
+    tape.play()
+
+    playing = true
+
+    if currentVideo then
+        playingVideo = true
+        lastVideoFrame = -1
+
+        -- Draw frame 1 immediately.
+        drawNFVFrame(
+            currentVideo,
+            1
+        )
+    end
+
+    drawHeader()
+    drawTapeProgress()
+
+    return true
+end
+
+
+-- ============================================================
+-- NEXT TRACK
+-- ============================================================
+
+local function getNextTrack()
+    if #queue > 0 then
+        local nextTrack =
+            table.remove(queue, 1)
+
+        queue_scroll =
+            clamp(
+                queue_scroll,
+                1,
+                math.max(1, #queue)
+            )
+
+        return nextTrack
+    end
+
+    return nil
+end
+
+
+local function playNextTrack()
+    local nextTrack =
+        getNextTrack()
+
+    if not nextTrack then
+        return false
+    end
+
+    return playResult(nextTrack)
+end
+
+
+-- ============================================================
+-- VIDEO SYNCHRONIZATION
+-- ============================================================
+
+local function videoLoop()
+    while true do
+
+        if
+            playing
+            and playingVideo
+            and currentVideo
+            and tape.isPlaying()
+        then
+
+            local tapePosition =
+                tape.getPosition()
+
+            -- DFPWM:
+            --
+            -- 1 encoded byte = 8 PCM samples
+            -- 48000 samples/sec
+            --
+            -- seconds =
+            -- tapePosition * 8 / 48000
+            --
+            -- Therefore:
+            -- seconds = tapePosition / 6000
+
+            local seconds =
+                (tapePosition * 8) / 48000
+
+            local frameIndex =
+                math.floor(
+                    seconds
+                    * currentVideo.fps
+                ) + 1
+
+            frameIndex =
+                clamp(
+                    frameIndex,
+                    1,
+                    #currentVideo.frames
+                )
+
+            if frameIndex ~= lastVideoFrame then
+
+                drawNFVFrame(
+                    currentVideo,
+                    frameIndex
+                )
+
+                lastVideoFrame =
+                    frameIndex
+            end
+
+        elseif
+            playing
+            and tape.isPlaying() == false
+        then
+
+            -- Tape stopped naturally.
+            --
+            -- Do not immediately assume it was manually
+            -- stopped; the UI loop handles autoplay/end logic.
+
+            playingVideo = false
+        end
+
+        sleep(0.02)
+    end
+end
+
+
+-- ============================================================
+-- SEARCH RESULT CLICK HANDLING
+-- ============================================================
+
+local function handleSearchClick(x, y, button)
+    local startY = 6
+
+    if y < startY then
+        return
+    end
+
+    local row =
+        y - startY
+
+    local index =
+        search_scroll + row
+
+    if index < 1
+        or index > #search_results then
+        return
+    end
+
+    local result =
+        search_results[index]
+
+    ------------------------------------------------------------
+    -- LEFT CLICK = PLAY
+    ------------------------------------------------------------
+
+    if button == 1 then
+        playResult(result)
+        return
+    end
+
+    ------------------------------------------------------------
+    -- RIGHT CLICK = QUEUE
+    ------------------------------------------------------------
+
+    if button == 2 then
+        table.insert(
+            queue,
+            result
+        )
+
+        return
+    end
+end
+
+
+-- ============================================================
+-- SEARCH INPUT
+-- ============================================================
+
+local function doSearchInput()
+    term.setCursorPos(9, 4)
+
+    local oldBackground =
+        term.getBackgroundColor()
+
+    local oldText =
+        term.getTextColor()
+
+    term.setBackgroundColor(colors.gray)
+    term.setTextColor(colors.black)
+
+    term.write(
+        string.rep(
+            " ",
+            math.max(
+                1,
+                width - 8
+            )
+        )
+    )
+
+    term.setCursorPos(9, 4)
+
+    local input =
+        read()
+
+    term.setBackgroundColor(
+        oldBackground
+    )
+
+    term.setTextColor(
+        oldText
+    )
+
+    search_text = input
+
+    if input ~= "" then
+        performSearch(input)
+    end
+end
+
+
+-- ============================================================
+-- PLAYLIST CONTROLS
+-- ============================================================
+
+local function handlePlaylistClick(x, y)
+    local startY = 6
+
+    if y < startY then
+        return
+    end
+
+    local index =
+        playlist_scroll
+        + (y - startY)
+
+    if index < 1
+        or index > #playlist then
+        return
+    end
+
+    if x >= width - 8
+        and x < width - 6
+    then
+        -- Move up.
+
+        if index > 1 then
+            playlist[index],
+            playlist[index - 1] =
+                playlist[index - 1],
+                playlist[index]
+
+            playlist_scroll =
+                clamp(
+                    playlist_scroll,
+                    1,
+                    math.max(
+                        1,
+                        #playlist
+                    )
+                )
+        end
+
+    elseif x >= width - 6
+        and x < width - 4
+    then
+        -- Move down.
+
+        if index < #playlist then
+            playlist[index],
+            playlist[index + 1] =
+                playlist[index + 1],
+                playlist[index]
+
+            playlist_scroll =
+                clamp(
+                    playlist_scroll,
+                    1,
+                    math.max(
+                        1,
+                        #playlist
+                    )
+                )
+        end
+
+    elseif x >= width - 3 then
+        -- Remove.
+
+        table.remove(
+            playlist,
+            index
+        )
+
+        playlist_scroll =
+            clamp(
+                playlist_scroll,
+                1,
+                math.max(
+                    1,
+                    #playlist
+                )
+            )
+    end
+end
+
+
+-- ============================================================
+-- QUEUE CONTROLS
+-- ============================================================
+
+local function handleQueueClick(x, y)
+    local startY = 6
+
+    -- Toggle autoplay by clicking title area.
+    if y == 4 then
+        autoplay = not autoplay
+        return
+    end
+
+    if y < startY then
+        return
+    end
+
+    local index =
+        queue_scroll
+        + (y - startY)
+
+    if index < 1
+        or index > #queue then
+        return
+    end
+
+    if x >= width - 8
+        and x < width - 6
+    then
+        if index > 1 then
+            queue[index],
+            queue[index - 1] =
+                queue[index - 1],
+                queue[index]
+        end
+
+    elseif x >= width - 6
+        and x < width - 4
+    then
+        if index < #queue then
+            queue[index],
+            queue[index + 1] =
+                queue[index + 1],
+                queue[index]
+        end
+
+    elseif x >= width - 3 then
+        table.remove(
+            queue,
+            index
+        )
+
+        queue_scroll =
+            clamp(
+                queue_scroll,
+                1,
+                math.max(
+                    1,
+                    #queue
+                )
+            )
+    end
+end
+
+
+-- ============================================================
+-- ADD SEARCH RESULT TO PLAYLIST
+-- ============================================================
+
+local function addSearchResultToPlaylist(y)
+    local startY = 6
+
+    if y < startY then
+        return
+    end
+
+    local index =
+        search_scroll
+        + (y - startY)
+
+    if index < 1
+        or index > #search_results then
+        return
+    end
+
+    table.insert(
+        playlist,
+        search_results[index]
+    )
+end
+
+
+-- ============================================================
+-- REDRAW
+-- ============================================================
+
+local function redrawScreen()
+    term.setBackgroundColor(colors.black)
+    term.clear()
+
+    drawHeader()
+    drawTabs()
+
+    if active_tab == 1 then
+        drawSearch()
+
+    elseif active_tab == 2 then
+        drawPlaylist()
+
+    elseif active_tab == 3 then
+        drawQueue()
+    end
+
+    drawTapeProgress()
+end
+
+
+-- ============================================================
+-- AUTOPLAY CHECK
+-- ============================================================
+
+local function checkTapeEnd()
+    if not playing then
+        return
+    end
+
+    if tape.isPlaying() then
+        return
+    end
+
+    -- If manually stopped, the UI event handler changes
+    -- playing to false before this matters.
+    --
+    -- Otherwise the tape has reached its end.
+
+    if autoplay and #queue > 0 then
+
+        playing = false
+        playingVideo = false
+
+        local nextTrack =
+            getNextTrack()
+
+        if nextTrack then
+            playResult(nextTrack)
+        end
+
+    else
+        playing = false
+        playingVideo = false
+    end
+end
+
+
+-- ============================================================
+-- UI LOOP
+-- ============================================================
+
+local function uiLoop()
+
+    while not restart_requested do
+
+        redrawScreen()
+
+        local event,
+            p1,
+            p2,
+            p3 =
+            os.pullEvent()
+
+        --------------------------------------------------------
+        -- MOUSE
+        --------------------------------------------------------
+
+        if event == "mouse_click" then
+
+            local button = p1
+            local x = p2
+            local y = p3
+
+            ----------------------------------------------------
+            -- SEARCH
+            ----------------------------------------------------
+
+            if active_tab == 1 then
+
+                -- Search box.
+                if y >= 4 and y <= 4 then
+
+                    doSearchInput()
+
+                -- Search result area.
+                elseif y >= 6
+                    and y <= height - 2
+                then
+
+                    -- + button.
+                    if x >= width - 2 then
+
+                        addSearchResultToPlaylist(y)
+
+                    else
+
+                        -- IMPORTANT:
+                        -- Left click goes directly into
+                        -- playResult(), which downloads BOTH
+                        -- audio and video for this result.
+                        handleSearchClick(
+                            x,
+                            y,
+                            button
+                        )
+                    end
+                end
+
+            ----------------------------------------------------
+            -- PLAYLIST
+            ----------------------------------------------------
+
+            elseif active_tab == 2 then
+
+                handlePlaylistClick(
+                    x,
+                    y
+                )
+
+            ----------------------------------------------------
+            -- QUEUE
+            ----------------------------------------------------
+
+            elseif active_tab == 3 then
+
+                handleQueueClick(
+                    x,
+                    y
+                )
+            end
+
+        --------------------------------------------------------
+        -- KEYBOARD
+        --------------------------------------------------------
+
+        elseif event == "key" then
+
+            local key = p1
+
+            ----------------------------------------------------
+            -- TAB NAVIGATION
+            ----------------------------------------------------
+
+            if key == keys.left then
+
+                active_tab =
+                    active_tab - 1
+
+                if active_tab < 1 then
+                    active_tab = #tabs
+                end
+
+            elseif key == keys.right then
+
+                active_tab =
+                    active_tab + 1
+
+                if active_tab > #tabs then
+                    active_tab = 1
+                end
+
+            ----------------------------------------------------
+            -- SEARCH
+            ----------------------------------------------------
+
+            elseif key == keys.enter
+                and active_tab == 1
+            then
+
+                doSearchInput()
+
+            ----------------------------------------------------
+            -- SCROLL
+            ----------------------------------------------------
+
+            elseif key == keys.up then
+
+                if active_tab == 1 then
+
+                    search_scroll =
+                        math.max(
+                            1,
+                            search_scroll - 1
+                        )
+
+                elseif active_tab == 2 then
+
+                    playlist_scroll =
+                        math.max(
+                            1,
+                            playlist_scroll - 1
+                        )
+
+                elseif active_tab == 3 then
+
+                    queue_scroll =
+                        math.max(
+                            1,
+                            queue_scroll - 1
+                        )
+                end
+
+            elseif key == keys.down then
+
+                if active_tab == 1 then
+
+                    search_scroll =
+                        math.min(
+                            math.max(
+                                1,
+                                #search_results
+                            ),
+                            search_scroll + 1
+                        )
+
+                elseif active_tab == 2 then
+
+                    playlist_scroll =
+                        math.min(
+                            math.max(
+                                1,
+                                #playlist
+                            ),
+                            playlist_scroll + 1
+                        )
+
+                elseif active_tab == 3 then
+
+                    queue_scroll =
+                        math.min(
+                            math.max(
+                                1,
+                                #queue
+                            ),
+                            queue_scroll + 1
+                        )
+                end
+
+            ----------------------------------------------------
+            -- SPACE = PLAY / PAUSE
+            ----------------------------------------------------
+
+            elseif key == keys.space then
+
+                if tape.isPlaying() then
+
+                    tape.stop()
+                    playing = false
+                    playingVideo = false
+
+                elseif current_track then
+
+                    tape.play()
+                    playing = true
+
+                    if currentVideo then
+                        playingVideo = true
+                        lastVideoFrame = -1
+                    end
+                end
+
+            ----------------------------------------------------
+            -- S = STOP
+            ----------------------------------------------------
+
+            elseif key == keys.s then
+
+                tape.stop()
+
+                playing = false
+                playingVideo = false
+
+                clearVideo()
+
+            ----------------------------------------------------
+            -- N = NEXT
+            ----------------------------------------------------
+
+            elseif key == keys.n then
+
+                tape.stop()
+
+                playing = false
+                playingVideo = false
+
+                playNextTrack()
+
+            ----------------------------------------------------
+            -- A = AUTOPLAY
+            ----------------------------------------------------
+
+            elseif key == keys.a then
+
+                autoplay = not autoplay
+
+            ----------------------------------------------------
+            -- W = WIPE TAPE
+            ----------------------------------------------------
+
+            elseif key == keys.w then
+
+                tape.stop()
+
+                playing = false
+                playingVideo = false
+
+                clearVideo()
+
+                local size =
+                    tape.getSize()
+
+                local chunkSize = 4096
+
+                rewindTape()
+
+                local remaining = size
+
+                while remaining > 0 do
+
+                    local amount =
+                        math.min(
+                            remaining,
+                            chunkSize
+                        )
+
+                    tape.write(
+                        string.rep(
+                            "\0",
+                            amount
+                        )
+                    )
+
+                    remaining =
+                        remaining - amount
+
+                    redrawScreen()
+                end
+
+                rewindTape()
+
+            ----------------------------------------------------
+            -- U = UPDATE
+            ----------------------------------------------------
+
+            elseif key == keys.u then
+
+                restart_requested = true
+            end
+
+        --------------------------------------------------------
+        -- MOUSE WHEEL
+        --------------------------------------------------------
+
+        elseif event == "mouse_scroll" then
+
+            local direction = p1
+
+            if active_tab == 1 then
+
+                search_scroll =
+                    clamp(
+                        search_scroll + direction,
+                        1,
+                        math.max(
+                            1,
+                            #search_results
+                        )
+                    )
+
+            elseif active_tab == 2 then
+
+                playlist_scroll =
+                    clamp(
+                        playlist_scroll + direction,
+                        1,
+                        math.max(
+                            1,
+                            #playlist
+                        )
+                    )
+
+            elseif active_tab == 3 then
+
+                queue_scroll =
+                    clamp(
+                        queue_scroll + direction,
+                        1,
+                        math.max(
+                            1,
+                            #queue
+                        )
+                    )
+            end
+        end
+
+        --------------------------------------------------------
+        -- AUTOPLAY
+        --------------------------------------------------------
+
+        if
+            playing
+            and not tape.isPlaying()
+        then
+            checkTapeEnd()
+        end
+    end
+end
+
+
+-- ============================================================
+-- TAPE MONITOR LOOP
+-- ============================================================
+
+local function tapeLoop()
+    while true do
+
+        if playing then
+
+            if tape.isPlaying() then
+                drawTapeProgress()
+            end
+
+        end
+
+        sleep(0.1)
+    end
+end
+
+
+-- ============================================================
+-- PLAYER UPDATE
+-- ============================================================
+
+local function updatePlayer()
+    while not restart_requested do
+        sleep(1)
+    end
+
+    if not restart_requested then
+        return
+    end
+
+    tape.stop()
+
+    clearVideo()
+
+    local url = player_update_url
+
+    local response, err =
+        http.get(url)
+
+    if not response then
+        term.clear()
+        term.setCursorPos(1, 1)
+        term.setTextColor(colors.red)
+        print(
+            "Update failed: "
+            .. tostring(err)
+        )
+
+        sleep(3)
+        return
+    end
+
+    local newCode =
+        response.readAll()
+
+    response.close()
+
+    if not newCode or #newCode < 100 then
+        term.clear()
+        term.setCursorPos(1, 1)
+        term.setTextColor(colors.red)
+        print("Downloaded player is invalid.")
+
+        sleep(3)
+        return
+    end
+
+    local temp =
+        "musica.lua.new"
+
+    local file =
+        fs.open(
+            temp,
+            "w"
+        )
+
+    file.write(newCode)
+    file.close()
+
+    if fs.exists("musica.lua") then
+        fs.delete("musica.lua")
+    end
+
+    fs.move(
+        temp,
+        "musica.lua"
+    )
+
+    term.clear()
+    term.setCursorPos(1, 1)
+
+    term.setTextColor(colors.lime)
+    print("Player updated.")
+    print("Restarting...")
+
+    sleep(2)
+
+    shell.run(
+        "musica.lua"
+    )
+
+    restart_requested = true
+end
+
+
+-- ============================================================
+-- START
+-- ============================================================
+
+redrawScreen()
+
+parallel.waitForAny(
+    uiLoop,
+    videoLoop,
+    tapeLoop,
+    updatePlayer
+)
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)
