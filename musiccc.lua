@@ -32,13 +32,13 @@ local api_base_url =
 local version = "2.2-pocket"
 
 local backend_url =
-    "https://nlkfobm3v66g.shares.zrok.io/convert?url="
+    "https://k76fpz4gem61.shares.zrok.io/convert?url="
 
 local backend_video_url =
-    "https://nlkfobm3v66g.shares.zrok.io/convertVideo?url="
+    "https://k76fpz4gem61.shares.zrok.io/convertVideo?url="
 
 local player_update_url =
-    "https://nlkfobm3v66g.shares.zrok.io/musica.lua"
+    "https://k76fpz4gem61.shares.zrok.io/musica.lua"
 
 ------------------------------------------------------------
 -- HARDWARE
