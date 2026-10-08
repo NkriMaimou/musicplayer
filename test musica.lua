@@ -3383,24 +3383,3 @@ term.setCursorPos(
     1,
     1
 )
-```
-
-### The actual fix
-
-The important part is now:
-
-```
-elseif event == "http_failure" then
-
-    local reason = arg3
-    local handle = arg4
-
-    ...
-
-    if handle
-        and type(handle.close) == "function" then
-
-        pcall(function()
-            handle.close()
-        end)
-    end
